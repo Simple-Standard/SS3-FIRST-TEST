@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
@@ -193,7 +193,7 @@ nav button{background:transparent;border:1px solid var(--accent);padding:8px 12p
           <hr style="margin-top:12px"/>
           <div><strong>Instructions</strong>
             <ul class="small">
-              <li>30 questions per subject (randomized from question bank).</li>
+              <li>20 questions per subject (randomized from question bank).</li>
               <li>5 questions shown at a time.</li>
               <li>Total time: 30 minutes. Auto-submit when time runs out.</li>
             </ul>
@@ -263,17 +263,40 @@ nav button{background:transparent;border:1px solid var(--accent);padding:8px 12p
           </div>
         </div>
 
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-          <select id="adminStudentSelect" class="select"></select>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+          <select id="adminStudentSelect" class="select" style="min-width:200px"></select>
+          <select id="resetSubjectSelect" class="select" style="min-width:180px">
+            <option value="">-- Select Subject to Reset --</option>
+          </select>
+          <button id="resetSubjectBtn" class="btn" style="background:#ef4444;color:white">Reset Subject Attempt</button>
+          <button id="examDetailsBtn" class="btn secondary">Exam Details</button>
+          <button id="viewResultBtn" class="btn">View Result</button>
           <button id="downloadResultPdf" class="btn">Download PDF</button>
           <button id="exportAllJson" class="btn secondary">Export All Results (JSON)</button>
         </div>
+
 
         <div id="resultsTable"></div>
       </div>
     </div>
   </section>
 
+<div id="examDetailsPage" class="hidden">
+  <h2>Exam Details Settings</h2>
+  <table id="examDetailsTable" border="1" style="width:100%; border-collapse:collapse;">
+    <tr>
+      <th>Subject</th>
+      <th>Max Attempts</th>
+      <th>Duration (Minutes)</th>
+      <th>Exam Date</th>
+    </tr>
+    <!-- rows will be inserted here by JS -->
+  </table>
+
+  <div style="margin-top:15px;text-align:right">
+    <button id="saveExamDetails" class="btn">Save Settings</button>
+    <button id="backToAdmin" class="btn secondary">Back to Admin</button>
+  </div>
 </div>
 
 <footer class="footer">SIMPLE STANDARD SCHOOL, JOS — SS3 Online Exam Portal • 2025/2026</footer>
@@ -443,7 +466,14 @@ QUESTIONS_DB["Hausa"] = [
 
 /* Utility */
 function el(id){ return document.getElementById(id); }
-function show(page){ [el('page1'),el('page2'),el('page3'),el('page4'),el('admin')].forEach(p=>p.classList.add('hidden')); page.classList.remove('hidden'); window.scrollTo(0,0); }
+function show(page) {
+  // hide ALL possible pages
+  [el('page1'), el('page2'), el('page3'), el('page4'), el('admin'), el('examDetailsPage')]
+    .forEach(p => p.classList.add('hidden'));
+  // then show the selected one
+  page.classList.remove('hidden');
+  window.scrollTo(0, 0);
+}
 
 /* --------- Firestore helpers --------- */
 async function saveStudentToFirestore(student){
@@ -547,33 +577,73 @@ el('toSubjectPage').addEventListener('click', ()=>{
 el('backToStudents').addEventListener('click', ()=> show(page2));
 
 /* Exam begin */
-el('beginExam').addEventListener('click', async ()=>{
-  const subj = el('subjectSelect').value; if(!subj){ alert('Select subject'); return; }
+el('beginExam').addEventListener('click', async () => {
+  const subj = el('subjectSelect').value;
+  if (!subj) { alert('Select subject'); return; }
+
   const stu = JSON.parse(sessionStorage.getItem('currentStudent'));
-  // load question pool from Firestore if available else fallback
-  let pool = QUESTIONS_DB[subj] || [];
-  if(db){
-    const all = await fetchAllQuestionsFromFirestore();
-    if(all && all.length){
-      pool = all.filter(q => (q.subject === subj) && (q.stream==='Both' || q.stream === stu.stream));
+
+  // 🔹 Load exam settings
+  const settings = JSON.parse(localStorage.getItem('exam_settings') || '{}');
+  const config = settings[subj] || { attempts: 1, duration: 30, date: '' };
+
+  // 🔸 Normalize and check date restriction
+  if (config.date) {
+    const today = new Date().toISOString().split('T')[0];  // e.g. "2025-11-07"
+    const examDate = config.date.trim();
+    if (today !== examDate) {
+      alert(`❌ You cannot take ${subj} today.\nExam is scheduled for ${examDate}.`);
+      return;
     }
   }
-  if(pool.length === 0) { if(!confirm('No questions uploaded for this subject. Continue?')) return; }
-  const selected = shuffleArray(pool).slice(0, Math.min(30, pool.length));
+
+  // 🔸 Check attempt restriction
+  let results = [];
+  if (db) {
+    try { results = await fetchResultsForExamNo(stu.examNo) || []; }
+    catch (e) { console.warn('Error checking attempts', e); }
+  } else {
+    results = JSON.parse(localStorage.getItem('sss_results_v1') || '[]');
+  }
+
+  const attemptsUsed = results.filter(r => r.examNo === stu.examNo && r.subject === subj).length;
+  if (attemptsUsed >= (config.attempts || 1)) {
+    alert(`❌ You have already used all ${config.attempts} attempt(s) for ${subj}.`);
+    return;
+  }
+
+  // 🔹 Load questions
+  let pool = QUESTIONS_DB[subj] || [];
+  if (db) {
+    const all = await fetchAllQuestionsFromFirestore();
+    if (all && all.length) {
+      pool = all.filter(q => (q.subject === subj) && (q.stream === 'Both' || q.stream === stu.stream));
+    }
+  }
+
+  if (pool.length === 0) {
+    alert('⚠️ No questions available for this subject.');
+    return;
+  }
+
+  // 🔹 Shuffle & prepare
+  const selected = shuffleArray(pool).slice(0, Math.min(20, pool.length));
   const examState = {
     student: stu,
     subject: subj,
     examNo: stu.examNo,
-    questions: selected.map(q=>({
+    questions: selected.map(q => ({
       q: q.q || q.question || ('No question'),
-      options: q.options || q.optionsArr || q.options || ['A','B','C','D'],
+      options: q.options || q.optionsArr || ['A', 'B', 'C', 'D'],
       answer: typeof q.answer !== 'undefined' ? q.answer : null
     })),
     answers: Array(selected.length).fill(null),
     started: false,
     startTimestamp: null,
-    durationSeconds: 30*60
+    durationSeconds: (config.duration || 30) * 60
   };
+
+  // 🔹 Save and start exam
   sessionStorage.setItem('examState', JSON.stringify(examState));
   startExam();
   show(page4);
@@ -675,6 +745,39 @@ el('addQuestionBtn').addEventListener('click', async ()=>{
   alert('Question added');
 });
 
+/* =============== RESET SINGLE SUBJECT ATTEMPT LOGIC =============== */
+
+// Function to populate the subject dropdown
+function populateResetSubjectList() {
+  const subjectSel = document.getElementById('resetSubjectSelect');
+  if (!subjectSel) return;
+
+  // Clear dropdown
+  subjectSel.innerHTML = '<option value="">-- Select Subject to Reset --</option>';
+
+  // Get subjects from multiple sources
+  const sci = typeof SCIENCE_SUBJECTS !== 'undefined' ? SCIENCE_SUBJECTS : [];
+  const soc = typeof SOCIAL_SUBJECTS !== 'undefined' ? SOCIAL_SUBJECTS : [];
+  
+  // Also check QUESTIONS_DB for subjects
+  const dbSubjects = typeof QUESTIONS_DB !== 'undefined' ? Object.keys(QUESTIONS_DB) : [];
+  
+  const subjects = [...new Set([...sci, ...soc, ...dbSubjects])]; // Combine all sources
+
+  if (subjects.length === 0) {
+    console.warn('⚠️ No subjects found. Check that subject arrays are defined.');
+    return;
+  }
+
+  // Sort subjects alphabetically for better UX
+  subjects.sort().forEach(sub => {
+    const opt = document.createElement('option');
+    opt.value = sub;
+    opt.textContent = sub;
+    subjectSel.appendChild(opt);
+  });
+}
+
 /* Admin: populate student dropdowns and results table */
 async function populateAdmin(){
   // load students from firestore if available
@@ -687,6 +790,7 @@ async function populateAdmin(){
   const sel = el('adminStudentSelect'); sel.innerHTML=''; const placeholder=document.createElement('option'); placeholder.value=''; placeholder.textContent='-- Select Student --'; sel.appendChild(placeholder);
   STUDENTS.forEach(s=>{ const o=document.createElement('option'); o.value=s.examNo; o.textContent = `${s.name} — ${s.examNo}`; sel.appendChild(o); });
   renderResultsTable();
+  populateResetSubjectList(); // ✅ Load the subjects dropdown
 }
 
 async function renderResultsTable(){
@@ -771,6 +875,19 @@ el('downloadResultPdf').addEventListener('click', async ()=>{
 
 /* export all results as JSON */
 el('exportAllJson').addEventListener('click', async ()=>{
+
+// Make sure dropdown is populated when Admin page loads
+document.addEventListener('DOMContentLoaded', () => {
+  populateResetSubjectList();
+});
+
+// Also repopulate every time admin panel is opened
+if (document.getElementById('adminLoginBtn')) {
+  document.getElementById('adminLoginBtn').addEventListener('click', () => {
+    setTimeout(populateResetSubjectList, 300);
+  });
+}
+
   let data = [];
   if(db){ data = await fetchAllResults(); } else data = JSON.parse(localStorage.getItem('sss_results_v1') || '[]');
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'sss_all_results.json'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
@@ -809,6 +926,185 @@ window.addEventListener('beforeunload', (e)=>{ if(sessionStorage.getItem('exam_i
   }
   populateStudentSelect();
 })();
+
+/* View Student Result (HTML Page) */
+el('viewResultBtn').addEventListener('click', async () => {
+  const examNo = el('adminStudentSelect').value;
+  if (!examNo) return alert('Select a student first');
+  const stu = STUDENTS.find(s => s.examNo === examNo);
+  if (!stu) return alert('Student not found');
+
+  // Fetch results
+  let results = [];
+  if (db) {
+    try { results = await fetchResultsForExamNo(examNo); } catch (e) { console.error(e); }
+  } else {
+    results = JSON.parse(localStorage.getItem('sss_results_v1') || '[]').filter(r => r.examNo === examNo);
+  }
+
+  if (!results.length) return alert('No results found for this student');
+
+  // Compute average
+  const avg = (results.reduce((a, b) => a + b.score, 0) / results.length).toFixed(2);
+  const grade = avg >= 70 ? "A (Excellent)" : avg >= 60 ? "B" : avg >= 50 ? "C" : avg >= 40 ? "D" : avg >= 35 ? "E" : "F";
+  const remark = avg >= 70 ? "Excellent" : avg >= 60 ? "Very Good" : avg >= 50 ? "Good" : avg >= 40 ? "Pass" : "Needs Improvement";
+
+  // Build new tab content
+  const win = window.open('', '_blank');
+  win.document.write(`
+    <html>
+    <head>
+      <title>Student Result - ${stu.name}</title>
+      <style>
+        body { font-family: 'Times New Roman', serif; margin: 30px; color: #000; }
+        .header { text-align: center; }
+        .header img { width: 80px; height: 80px; object-fit: contain; }
+        .school-name { font-family: 'Cooper Black', serif; color: navy; font-size: 22px; font-weight: bold; text-transform: uppercase; }
+        h2 { text-align: center; text-transform: uppercase; margin-top: 10px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #333; padding: 8px; text-align: center; }
+        th { background-color: #f0f0f0; }
+        .info { margin-top: 20px; font-size: 14px; }
+        .footer { margin-top: 20px; font-weight: bold; }
+        .print-btn { margin-top: 25px; padding: 10px 20px; background: navy; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        @page { size: A4; margin: 20mm; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <img src="./logo.png" alt="School Logo"><br>
+        <div class="school-name">SIMPLE STANDARD SCHOOL, JOS</div>
+        <h2>STUDENT RESULT</h2>
+      </div>
+
+      <div class="info">
+        <strong>Student Name:</strong> ${stu.name}<br>
+        <strong>Exam Number:</strong> ${stu.examNo}<br>
+        <strong>Stream:</strong> ${stu.stream}<br>
+        <strong>Date:</strong> ${new Date().toLocaleDateString()}
+      </div>
+
+      <table>
+        <tr><th>Subject</th><th>Score (%)</th><th>Grade</th></tr>
+        ${results.map(r => `<tr><td>${r.subject}</td><td>${r.score}</td><td>${r.score >= 70 ? 'A' : r.score >= 60 ? 'B' : r.score >= 50 ? 'C' : r.score >= 40 ? 'D' : r.score >= 35 ? 'E' : 'F'}</td></tr>`).join('')}
+      </table>
+
+      <div class="footer">
+        <p>Average Score: ${avg}%</p>
+        <p>Grade: ${grade}</p>
+        <p>Remark: ${remark}</p>
+      </div>
+
+      <div style="text-align:center;">
+        <button class="print-btn" onclick="window.print()">Print Result</button>
+      </div>
+    </body>
+    </html>
+  `);
+  win.document.close();
+});
+
+/* ===================== FIXED EXAM DETAILS LOGIC ===================== */
+
+// When the admin clicks "Exam Details" button
+el('examDetailsBtn').addEventListener('click', () => {
+  populateExamDetailsTable();   // build the table dynamically
+  show(el('examDetailsPage'));  // show the page
+});
+
+// Back button
+el('backToAdmin').addEventListener('click', () => {
+  show(el('admin'));
+});
+
+// Save button — saves settings to localStorage
+el('saveExamDetails').addEventListener('click', () => {
+  const settings = {};
+
+  // collect values from table rows
+  document.querySelectorAll('#examDetailsTable tr[data-subject]').forEach(row => {
+    const subj = row.dataset.subject;
+    const attempts = parseInt(row.querySelector('.attempt').value) || 1;
+    const duration = parseInt(row.querySelector('.duration').value) || 30;
+    const date = row.querySelector('.date').value || '';
+    settings[subj] = { attempts, duration, date };
+  });
+
+  // save to localStorage
+  localStorage.setItem('exam_settings', JSON.stringify(settings));
+  alert('✅ Exam details saved successfully!');
+  show(el('admin'));
+});
+
+// Build table dynamically and load previous settings
+function populateExamDetailsTable() {
+  const table = el('examDetailsTable');
+  const settings = JSON.parse(localStorage.getItem('exam_settings') || '{}');
+  const subjects = [...new Set([...SCIENCE_SUBJECTS, ...SOCIAL_SUBJECTS])];
+
+  // Create table rows
+  const rows = subjects.map(subj => {
+    const config = settings[subj] || {};
+    return `
+      <tr data-subject="${subj}">
+        <td>${subj}</td>
+        <td><input type="number" class="attempt" min="1" max="10" value="${config.attempts || 1}"></td>
+        <td><input type="number" class="duration" min="5" max="180" value="${config.duration || 30}"></td>
+        <td><input type="date" class="date" value="${config.date || ''}"></td>
+      </tr>
+    `;
+  }).join('');
+
+  // Rebuild the table (preserve header)
+  table.innerHTML = `
+    <tr>
+      <th>Subject</th>
+      <th>Max Attempts</th>
+      <th>Duration (Minutes)</th>
+      <th>Exam Date</th>
+    </tr>
+    ${rows}
+  `;
+}
+
+/* ==================== RESET SUBJECT ATTEMPT FIX ==================== */
+document.addEventListener('DOMContentLoaded', () => {
+  const resetBtn = document.getElementById('resetSubjectBtn');
+  if (!resetBtn) return;
+
+  resetBtn.addEventListener('click', () => {
+    const examNo = document.getElementById('adminStudentSelect').value;
+    const subject = document.getElementById('resetSubjectSelect').value;
+
+    if (!examNo) return alert('❌ Please select a student first.');
+    if (!subject) return alert('❌ Please select a subject to reset.');
+
+    const confirmReset = confirm(`⚠️ This will delete "${subject}" exam attempt for student ${examNo}. Continue?`);
+    if (!confirmReset) return;
+
+    try {
+      let results = JSON.parse(localStorage.getItem('sss_results_v1') || '[]');
+      const beforeCount = results.length;
+
+      // Filter out the selected student's subject
+      results = results.filter(r => !(r.examNo === examNo && r.subject === subject));
+
+      const removed = beforeCount - results.length;
+      localStorage.setItem('sss_results_v1', JSON.stringify(results));
+
+      if (removed > 0) {
+        alert(`✅ Successfully cleared "${subject}" attempt for student ${examNo}.`);
+        renderResultsTable(); // Refresh table
+      } else {
+        alert(`⚠️ No "${subject}" exam record found for student ${examNo}.`);
+      }
+    } catch (error) {
+      console.error(error);
+      alert('❌ Error during reset: ' + error.message);
+    }
+  });
+});
+
 </script>
 </body>
 </html>
