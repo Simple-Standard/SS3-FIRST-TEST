@@ -661,6 +661,7 @@ el('adminBtn').addEventListener('click', ()=>{
   } else {
     el('adminPanel').classList.add('hidden');
   }
+  populateAdmin(); // ✅ refresh admin dropdowns each time admin page opens
   show(adminPage);
 });
 el('toStudentSelect').addEventListener('click', ()=>{ populateStudentSelect(); show(page2); });
@@ -1149,6 +1150,7 @@ window.addEventListener('beforeunload', (e)=>{ if(sessionStorage.getItem('exam_i
     });
   }
   populateStudentSelect();
+  populateAdmin(); // ensure admin student dropdown is filled too
 })();
 
 /* View Student Result (HTML Page) */
@@ -1428,3 +1430,4 @@ async function saveQuestionsToFirestore(subject, questions){
 </script>
 </body>
 </html>
+
