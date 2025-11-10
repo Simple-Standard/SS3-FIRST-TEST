@@ -382,24 +382,48 @@ let STUDENTS = [
 /* ====== Auto-generate exam numbers ====== */
 
 // Utility to get next exam number by stream
-function getNextExamNumber(stream) {
+async function getNextExamNumber(stream) {
   if (!stream) return '';
 
-  // Filter students by stream
-  const filtered = STUDENTS.filter(s => s.stream === stream);
+  let allStudents = [...STUDENTS];
 
-  // Extract numeric part of exam numbers, e.g., 1001 from "SS3/2025/1001"
-  const numbers = filtered
+  // 🔹 Include Firestore students too
+  if (db) {
+    try {
+      const fromDb = await fetchAllStudentsFromFirestore();
+      if (fromDb && fromDb.length) {
+        const existing = new Map(allStudents.map(s => [s.examNo, s]));
+        fromDb.forEach(s => existing.set(s.examNo, s));
+        allStudents = Array.from(existing.values());
+      }
+    } catch (e) {
+      console.warn('Could not fetch from Firestore while generating exam number', e);
+    }
+  }
+
+  // 🔹 Extract all numeric portions
+  const allNumbers = allStudents
     .map(s => parseInt(s.examNo.split('/').pop(), 10))
     .filter(n => !isNaN(n));
 
-  // Find max number or start from base
-  const lastNum = numbers.length ? Math.max(...numbers) : (stream === 'Science' ? 1000 : 2000);
+  const highestOverall = allNumbers.length ? Math.max(...allNumbers) : 1000;
 
-  // Increment for next
-  const nextNum = lastNum + 1;
+  // 🔹 Find where Science currently ends
+  const scienceNumbers = allStudents
+    .filter(s => s.stream === 'Science')
+    .map(s => parseInt(s.examNo.split('/').pop(), 10))
+    .filter(n => !isNaN(n));
 
-  // Format with prefix
+  const scienceEnd = scienceNumbers.length ? Math.max(...scienceNumbers) : 1000;
+
+  // 🔹 If Science student → continue from scienceEnd
+  // 🔹 If Social student → continue from highestOverall (after Science)
+  const base =
+    stream === 'Science'
+      ? scienceEnd
+      : highestOverall;
+
+  const nextNum = base + 1;
   return `SS3/2025/${nextNum}`;
 }
 
@@ -667,35 +691,9 @@ el('adminBtn').addEventListener('click', ()=>{
 el('toStudentSelect').addEventListener('click', ()=>{ populateStudentSelect(); show(page2); });
 
 function populateStudentSelect(){
-  console.log('populateStudentSelect called, STUDENTS length:', Array.isArray(STUDENTS) ? STUDENTS.length : typeof STUDENTS, STUDENTS);
-  const sel = el('studentSelect');
-  if(!sel){
-    console.error('studentSelect element not found');
-    return;
-  }
-  sel.innerHTML = '';
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = '-- Select Student --';
-  sel.appendChild(placeholder);
-
-  if(!Array.isArray(STUDENTS) || STUDENTS.length === 0){
-    console.warn('No students available to populate studentSelect');
-    return;
-  }
-
-  STUDENTS.forEach(s => {
-    // Defensive normalization
-    const name = s.name || s.fullName || 'Unknown';
-    const examNo = s.examNo || s.id || 'N/A';
-    const stream = s.stream || 'Science';
-    const o = document.createElement('option');
-    o.value = examNo;
-    o.textContent = `${name} — ${examNo} (${stream})`;
-    sel.appendChild(o);
-  });
-
-  console.log('studentSelect populated, option count:', sel.options.length);
+  const sel = el('studentSelect'); sel.innerHTML='';
+  const placeholder = document.createElement('option'); placeholder.value=''; placeholder.textContent='-- Select Student --'; sel.appendChild(placeholder);
+  STUDENTS.forEach(s=>{ const o=document.createElement('option'); o.value=s.examNo; o.textContent=`${s.name} — ${s.examNo} (${s.stream})`; sel.appendChild(o); });
 }
 
 el('toHomeFromStudents').addEventListener('click', ()=> show(page1));
@@ -753,11 +751,15 @@ el('beginExam').addEventListener('click', async () => {
   // 🔹 Load questions
   let pool = QUESTIONS_DB[subj] || [];
   if (db) {
-    const all = await fetchAllQuestionsFromFirestore();
-    if (all && all.length) {
-      pool = all.filter(q => (q.subject === subj) && (q.stream === 'Both' || q.stream === stu.stream));
-    }
-  }
+  const snap = await getDocs(collection(db, 'questions'));
+  const firestoreQuestions = [];
+  snap.forEach(d => firestoreQuestions.push(d.data()));
+
+  pool = firestoreQuestions.filter(q =>
+    q.subject === subj &&
+    (q.stream === 'Both' || q.stream === stu.stream)
+  );
+}
 
   if (pool.length === 0) {
     alert('⚠️ No questions available for this subject.');
@@ -936,20 +938,28 @@ el('addStudentBtn').addEventListener('click', async () => {
   const name = el('newStudentName').value.trim();
   const stream = el('newStudentStream').value;
 
-  // ✅ Auto-generate exam number BEFORE validation
-  const examNo = getNextExamNumber(stream);
-
-  if (!name || !examNo) {
-    alert('Provide name and exam number');
+  if (!name || !stream) {
+    alert('Provide student name and select stream.');
     return;
   }
 
-  const newStudent = { name, examNo, stream };
+  // ✅ Generate unique sequential exam number (now async)
+  const examNo = await getNextExamNumber(stream);
 
-  // ✅ Add to memory
+  const newStudent = { name, stream, examNo };
+
+  // ✅ Add to memory and prevent duplicates
   STUDENTS.push(newStudent);
+  STUDENTS = Array.from(new Map(STUDENTS.map(s => [s.examNo, s])).values());
 
-  // ✅ Save to Firestore if enabled
+  // 🔹 Sort by exam number for display order
+  STUDENTS.sort((a, b) => {
+    const numA = parseInt(a.examNo.split('/').pop(), 10);
+    const numB = parseInt(b.examNo.split('/').pop(), 10);
+    return numA - numB;
+  });
+
+  // ✅ Save to Firestore if available
   if (db) {
     try {
       await saveStudentToFirestore(newStudent);
@@ -958,18 +968,17 @@ el('addStudentBtn').addEventListener('click', async () => {
       alert('Error saving student to Firestore');
     }
   } else {
-    // Optional: persist locally too
     localStorage.setItem('sss_students_v1', JSON.stringify(STUDENTS));
   }
 
-  // ✅ Clear inputs
+  // ✅ Clear input fields
   el('newStudentName').value = '';
   el('newStudentStream').value = '';
   el('newStudentExamNo').value = '';
 
-  // ✅ Refresh both student dropdowns everywhere
-  await populateAdmin();          // refresh result-check dropdown
-  populateStudentSelect();        // refresh exam student dropdown
+  // ✅ Refresh UI
+  await populateAdmin();   // refresh admin dropdowns
+  populateStudentSelect(); // refresh exam dropdown
 
   // ✅ Confirm success
   alert(`✅ Student "${name}" added successfully! Exam No: ${examNo}`);
@@ -1031,52 +1040,22 @@ function populateResetSubjectList() {
 
 /* Admin: populate student dropdowns and results table */
 async function populateAdmin(){
-  console.log('populateAdmin called, STUDENTS length before fetch:', Array.isArray(STUDENTS) ? STUDENTS.length : typeof STUDENTS, STUDENTS);
-
-  // Try to fetch students from Firestore if available and normalize them
+  // load students from firestore if available
   if(db){
     try {
       const studentsFromDb = await fetchAllStudentsFromFirestore();
-      console.log('studentsFromDb from Firestore:', studentsFromDb);
-      if(Array.isArray(studentsFromDb) && studentsFromDb.length){
-        STUDENTS = studentsFromDb.map(s => ({
-          name: s.name || s.fullName || s.displayName || 'Unknown',
-          examNo: s.examNo || s.id || (s.docId || s._id) || 'N/A',
-          stream: s.stream || s.field || 'Science'
-        }));
+      if (studentsFromDb && studentsFromDb.length) {
+        // 🔹 Merge Firestore + local students, avoid duplicates
+        const existing = new Map(STUDENTS.map(s => [s.examNo, s]));
+        studentsFromDb.forEach(s => existing.set(s.examNo, s));
+        STUDENTS = Array.from(existing.values());
       }
-    } catch(e){
-      console.error('Error fetching students from Firestore in populateAdmin:', e);
-    }
+    } catch(e){ console.error('Unable to fetch students from Firestore', e); }
   }
-
-  const sel = el('adminStudentSelect');
-  if(!sel){
-    console.error('adminStudentSelect element not found');
-    return;
-  }
-  sel.innerHTML = '';
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = '-- Select Student --';
-  sel.appendChild(placeholder);
-
-  if(!Array.isArray(STUDENTS) || STUDENTS.length === 0){
-    console.warn('No students available to populate adminStudentSelect');
-  } else {
-    STUDENTS.forEach(s => {
-      const name = s.name || 'Unknown';
-      const examNo = s.examNo || 'N/A';
-      const o = document.createElement('option');
-      o.value = examNo;
-      o.textContent = `${name} — ${examNo}`;
-      sel.appendChild(o);
-    });
-  }
-
-  console.log('adminStudentSelect populated, option count:', sel.options.length);
+  const sel = el('adminStudentSelect'); sel.innerHTML=''; const placeholder=document.createElement('option'); placeholder.value=''; placeholder.textContent='-- Select Student --'; sel.appendChild(placeholder);
+  STUDENTS.forEach(s=>{ const o=document.createElement('option'); o.value=s.examNo; o.textContent = `${s.name} — ${s.examNo}`; sel.appendChild(o); });
   renderResultsTable();
-  populateResetSubjectList();
+  populateResetSubjectList(); // ✅ Load the subjects dropdown
 }
 
 async function renderResultsTable(){
@@ -1185,40 +1164,50 @@ window.addEventListener('beforeunload', (e)=>{ if(sessionStorage.getItem('exam_i
 
 /* Initialization: load students/questions from Firestore if available */
 (async function init(){
-  if(db){
-  try {
-    const studentsFromDb = await fetchAllStudentsFromFirestore();
-    console.log('init() studentsFromDb from Firestore:', studentsFromDb);
-    if(Array.isArray(studentsFromDb) && studentsFromDb.length){
-      STUDENTS = studentsFromDb.map(s => ({
-        name: s.name || s.fullName || s.displayName || 'Unknown',
-        examNo: s.examNo || s.id || (s.docId || s._id) || 'N/A',
-        stream: s.stream || s.field || 'Science'
-      }));
-    }
-    const questionsFromDb = await fetchAllQuestionsFromFirestore();
-    if(questionsFromDb && questionsFromDb.length){
-      QUESTIONS_DB = {};
-      questionsFromDb.forEach(q=>{
-        if(!QUESTIONS_DB[q.subject]) QUESTIONS_DB[q.subject] = [];
-        QUESTIONS_DB[q.subject].push(q);
-      });
-    }
-  } catch(e){ console.warn('Error preloading from Firestore', e); }
-} else {
-  // fallback: generate dummy MCQs automatically for each subject if none exist
-  [...SCIENCE_SUBJECTS, ...SOCIAL_SUBJECTS].forEach(s=>{
-    if(!QUESTIONS_DB[s] || QUESTIONS_DB[s].length===0){
-      const qs = [];
-      for(let i=1;i<=40;i++){
-        qs.push({subject:s, stream:'Both', q:`(${s}) Q${i}: Which option is correct for question ${i}?`, options:[`A. option A`,`B. option B`,`C. option C`,`D. option D`], answer: Math.floor(Math.random()*4)});
+  if (db) {
+    try {
+      const studentsFromDb = await fetchAllStudentsFromFirestore();
+
+      if (studentsFromDb && studentsFromDb.length) {
+        // 🔹 Merge Firestore + local predefined students (avoid duplicates)
+        const existing = new Map(STUDENTS.map(s => [s.examNo, s]));
+        studentsFromDb.forEach(s => existing.set(s.examNo, s));
+        STUDENTS = Array.from(existing.values());
       }
-      QUESTIONS_DB[s] = qs;
+
+      const questionsFromDb = await fetchAllQuestionsFromFirestore();
+      if (questionsFromDb && questionsFromDb.length) {
+        QUESTIONS_DB = {}; // re-build grouped by subject
+        questionsFromDb.forEach(q => {
+          if (!QUESTIONS_DB[q.subject]) QUESTIONS_DB[q.subject] = [];
+          QUESTIONS_DB[q.subject].push(q);
+        });
+      }
+    } catch (e) {
+      console.warn('Error preloading from Firestore', e);
     }
-  });
-}
+  } else {
+    // fallback: generate dummy MCQs automatically for each subject if none exist
+    [...SCIENCE_SUBJECTS, ...SOCIAL_SUBJECTS].forEach(s => {
+      if (!QUESTIONS_DB[s] || QUESTIONS_DB[s].length === 0) {
+        const qs = [];
+        for (let i = 1; i <= 40; i++) {
+          qs.push({
+            subject: s,
+            stream: 'Both',
+            q: `(${s}) Q${i}: Which option is correct for question ${i}?`,
+            options: [`A. option A`, `B. option B`, `C. option C`, `D. option D`],
+            answer: Math.floor(Math.random() * 4)
+          });
+        }
+        QUESTIONS_DB[s] = qs;
+      }
+    });
+  }
+
+  // ✅ After data loads, refresh both dropdowns
   populateStudentSelect();
-  populateAdmin(); // ensure admin student dropdown is filled too
+  populateAdmin(); 
 })();
 
 /* View Student Result (HTML Page) */
@@ -1417,10 +1406,35 @@ el('editQuestionsBtn').addEventListener('click', async ()=>{
   show(editQuestionsPage);
 });
 
+// ✅ Improved: load subjects and questions directly from Firestore
 async function loadSubjectsToEdit() {
   editSubjectSelect.innerHTML = '<option value="">-- Select Subject --</option>';
-  const subjects = Object.keys(QUESTIONS_DB || {});
-  subjects.forEach(subj => {
+
+  let subjects = [];
+
+  if (db) {
+    // 🔹 Load all questions from Firestore
+    const snap = await getDocs(collection(db, 'questions'));
+    const firestoreQuestions = [];
+    snap.forEach(docSnap => firestoreQuestions.push(docSnap.data()));
+
+    // 🔹 Group by subject
+    const grouped = {};
+    firestoreQuestions.forEach(q => {
+      if (!grouped[q.subject]) grouped[q.subject] = [];
+      grouped[q.subject].push(q);
+    });
+
+    // 🔹 Replace local QUESTIONS_DB with full set
+    QUESTIONS_DB = grouped;
+    subjects = Object.keys(grouped);
+  } else {
+    // fallback local
+    subjects = Object.keys(QUESTIONS_DB || {});
+  }
+
+  // Populate the dropdown
+  subjects.sort().forEach(subj => {
     const opt = document.createElement('option');
     opt.value = subj;
     opt.textContent = subj;
@@ -1490,14 +1504,30 @@ el('saveQuestionChanges').addEventListener('click', async ()=>{
 });
 
 el('backFromEdit').addEventListener('click', ()=> show(adminPage));
-async function saveQuestionsToFirestore(subject, questions){
-  const ref = doc(db, 'exam_subjects', subject);
-  await setDoc(ref, { questions }, { merge:true });
+// ✅ Correct Firestore save function — updates "questions" collection properly
+import { deleteDoc } from "https://www.gstatic.com/firebasejs/10.5.2/firebase-firestore.js";
+
+async function saveQuestionsToFirestore(subject, questions) {
+  if (!db) return;
+
+  // 🔹 Delete existing questions for this subject
+  const snap = await getDocs(collection(db, 'questions'));
+  for (const docSnap of snap.docs) {
+    const data = docSnap.data();
+    if (data.subject === subject) {
+      await deleteDoc(docSnap.ref);
+    }
+  }
+
+  // 🔹 Re-add updated ones
+  for (const q of questions) {
+    await addDoc(collection(db, 'questions'), q);
+  }
+
+  console.log(`✅ Updated ${questions.length} questions for ${subject}`);
 }
 
 </script>
 </body>
 </html>
-
-
 
